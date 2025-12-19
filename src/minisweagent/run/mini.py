@@ -26,6 +26,7 @@ from minisweagent.run.utils.save import save_traj
 from minisweagent.utils.log import logger
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
+DEFAULT_ACONTEXT_CONFIG = builtin_config_dir / "acontext.yaml"
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
@@ -43,6 +44,52 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 """
 
 
+def _load_acontext_config(
+    acontext_enabled: bool,
+    acontext_config_path: Path | None,
+    acontext_space_name: str | None,
+    acontext_space_id: str | None,
+    acontext_session_id: str | None,
+) -> dict | None:
+    """Load and prepare AContext configuration.
+
+    Args:
+        acontext_enabled: Whether AContext is enabled.
+        acontext_config_path: Path to AContext config file.
+        acontext_space_name: Space name override.
+        acontext_space_id: Space ID override.
+        acontext_session_id: Session ID to resume.
+
+    Returns:
+        AContext configuration dictionary, or None if disabled.
+    """
+    if not acontext_enabled:
+        return None
+
+    # Load base config
+    config_path = acontext_config_path or DEFAULT_ACONTEXT_CONFIG
+    acontext_config = {}
+    if config_path.exists():
+        try:
+            full_config = yaml.safe_load(config_path.read_text())
+            acontext_config = full_config.get("acontext", {})
+        except Exception as e:
+            logger.warning(f"Failed to load AContext config from {config_path}: {e}")
+
+    # Enable AContext
+    acontext_config["enabled"] = True
+
+    # Apply CLI overrides
+    if acontext_space_name:
+        acontext_config.setdefault("space", {})["space_name"] = acontext_space_name
+    if acontext_space_id:
+        acontext_config.setdefault("space", {})["space_id"] = acontext_space_id
+    if acontext_session_id:
+        acontext_config.setdefault("session", {})["session_id"] = acontext_session_id
+
+    return acontext_config
+
+
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
@@ -55,6 +102,12 @@ def main(
     config_spec: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
     output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
+    # AContext options
+    acontext_enabled: bool = typer.Option(False, "--acontext/--no-acontext", help="Enable AContext for SOP learning and experience retrieval", rich_help_panel="AContext"),
+    acontext_config: Path | None = typer.Option(None, "--acontext-config", help="Path to AContext config file", rich_help_panel="AContext"),
+    acontext_space_name: str | None = typer.Option(None, "--acontext-space-name", help="AContext space name", rich_help_panel="AContext"),
+    acontext_space_id: str | None = typer.Option(None, "--acontext-space-id", help="AContext space ID (takes precedence over name)", rich_help_panel="AContext"),
+    acontext_session_id: str | None = typer.Option(None, "--acontext-session-id", help="AContext session ID to resume", rich_help_panel="AContext"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -86,12 +139,33 @@ def main(
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 
-    # Both visual flag and the MSWEA_VISUAL_MODE_DEFAULT flip the mode, so it's essentially a XOR
-    agent_class = InteractiveAgent
-    if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
-        agent_class = TextualAgent
+    # Load AContext configuration
+    acontext_cfg = _load_acontext_config(
+        acontext_enabled=acontext_enabled,
+        acontext_config_path=acontext_config,
+        acontext_space_name=acontext_space_name,
+        acontext_space_id=acontext_space_id,
+        acontext_session_id=acontext_session_id,
+    )
 
-    agent = agent_class(model, env, **config.get("agent", {}))
+    # Determine agent class based on visual mode and AContext
+    # Both visual flag and the MSWEA_VISUAL_MODE_DEFAULT flip the mode, so it's essentially a XOR
+    use_textual = visual != (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false")
+
+    if use_textual:
+        # TextualAgent doesn't support AContext yet
+        if acontext_cfg:
+            console.print("[yellow]Warning: AContext is not yet supported with TextualAgent (visual mode). Disabling AContext.[/yellow]")
+            acontext_cfg = None
+        agent_class = TextualAgent
+        agent = agent_class(model, env, **config.get("agent", {}))
+    else:
+        if acontext_cfg:
+            from minisweagent.agents.interactive_context_aware import InteractiveContextAwareAgent
+            agent = InteractiveContextAwareAgent(model, env, acontext_config=acontext_cfg, **config.get("agent", {}))
+        else:
+            agent = InteractiveAgent(model, env, **config.get("agent", {}))
+
     exit_status, result, extra_info = None, None, None
     try:
         exit_status, result = agent.run(task)  # type: ignore[arg-type]

@@ -1,0 +1,50 @@
+# AContext Configuration for mini-swe-agent
+#
+# This file contains the default configuration for AContext integration.
+# You can override these settings via CLI arguments or environment variables.
+#
+# Environment Variables:
+#   ACONTEXT_API_KEY - API key for AContext (required)
+#   ACONTEXT_BASE_URL - AContext server URL (default: http://localhost:8029/api/v1)
+
+acontext:
+  # Whether AContext is enabled (default: false, must be explicitly enabled via --acontext)
+  enabled: false
+
+  # API configuration
+  # api_key: "sk-ac-your-root-api-bearer-token"  # Use ACONTEXT_API_KEY env var instead
+  # base_url: "http://localhost:8029/api/v1"     # Use ACONTEXT_BASE_URL env var instead
+  timeout: 60.0
+
+  # Space configuration
+  space:
+    # Default space name (will be created if not exists)
+    space_name: "mini-swe-agent-default"
+    # Optionally specify a space ID directly (takes precedence over space_name)
+    # space_id: null
+
+  # Session configuration
+  session:
+    # Session ID to resume (null = create new session)
+    # session_id: null
+    # Whether to resume the most recent session
+    resume_last: false
+    # Additional metadata to store with the session
+    configs: {}
+
+  # SOP search configuration
+  sop_search:
+    # Whether to search for SOPs before each task
+    enabled: true
+    # Search mode: "fast" (quick semantic search) or "agentic" (AI-powered iterative search)
+    mode: "fast"
+    # Maximum number of SOPs to retrieve
+    limit: 5
+    # Semantic similarity threshold (0.0 to 1.0, higher = more strict)
+    # Only SOPs with relevance >= this threshold will be included
+    semantic_threshold: 0.5
+
+  # Message storage configuration
+  message:
+    # Whether to store messages in real-time
+    store_realtime: true

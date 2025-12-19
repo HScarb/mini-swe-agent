@@ -4,6 +4,7 @@
 # Read this first: https://mini-swe-agent.com/latest/usage/swebench/  (usage docs)
 
 import concurrent.futures
+import copy
 import json
 import random
 import re
@@ -46,24 +47,40 @@ DATASET_MAPPING = {
     "_test": "klieret/swe-bench-dummy-test-dataset",
 }
 
+DEFAULT_ACONTEXT_CONFIG = builtin_config_dir / "acontext.yaml"
 
 _OUTPUT_FILE_LOCK = threading.Lock()
 
 
-class ProgressTrackingAgent(DefaultAgent):
-    """Simple wrapper around DefaultAgent that provides progress updates."""
+def _create_progress_tracking_agent_class(base_class):
+    """Create a ProgressTrackingAgent class that inherits from the given base class.
 
-    def __init__(self, *args, progress_manager: RunBatchProgressManager, instance_id: str = "", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.progress_manager: RunBatchProgressManager = progress_manager
-        self.instance_id = instance_id
+    Args:
+        base_class: The base agent class to inherit from (DefaultAgent or ContextAwareAgent).
 
-    def step(self) -> dict:
-        """Override step to provide progress updates."""
-        self.progress_manager.update_instance_status(
-            self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
-        )
-        return super().step()
+    Returns:
+        A ProgressTrackingAgent class.
+    """
+    class ProgressTrackingAgent(base_class):
+        """Wrapper around base agent that provides progress updates."""
+
+        def __init__(self, *args, progress_manager: RunBatchProgressManager, instance_id: str = "", **kwargs):
+            super().__init__(*args, **kwargs)
+            self.progress_manager: RunBatchProgressManager = progress_manager
+            self.instance_id = instance_id
+
+        def step(self) -> dict:
+            """Override step to provide progress updates."""
+            self.progress_manager.update_instance_status(
+                self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
+            )
+            return super().step()
+
+    return ProgressTrackingAgent
+
+
+# Default ProgressTrackingAgent for backward compatibility
+ProgressTrackingAgent = _create_progress_tracking_agent_class(DefaultAgent)
 
 
 def get_swebench_docker_image_name(instance: dict) -> str:
@@ -119,11 +136,54 @@ def remove_from_preds_file(output_path: Path, instance_id: str):
             output_path.write_text(json.dumps(output_data, indent=2))
 
 
+def _load_acontext_config(
+    acontext_enabled: bool,
+    acontext_config_path: Path | None,
+    acontext_space_name: str | None,
+    acontext_space_id: str | None,
+) -> dict | None:
+    """Load and prepare AContext configuration for batch processing.
+
+    Args:
+        acontext_enabled: Whether AContext is enabled.
+        acontext_config_path: Path to AContext config file.
+        acontext_space_name: Space name override.
+        acontext_space_id: Space ID override.
+
+    Returns:
+        AContext configuration dictionary, or None if disabled.
+    """
+    if not acontext_enabled:
+        return None
+
+    # Load base config
+    config_path = acontext_config_path or DEFAULT_ACONTEXT_CONFIG
+    acontext_config = {}
+    if config_path.exists():
+        try:
+            full_config = yaml.safe_load(config_path.read_text())
+            acontext_config = full_config.get("acontext", {})
+        except Exception as e:
+            logger.warning(f"Failed to load AContext config from {config_path}: {e}")
+
+    # Enable AContext
+    acontext_config["enabled"] = True
+
+    # Apply CLI overrides
+    if acontext_space_name:
+        acontext_config.setdefault("space", {})["space_name"] = acontext_space_name
+    if acontext_space_id:
+        acontext_config.setdefault("space", {})["space_id"] = acontext_space_id
+
+    return acontext_config
+
+
 def process_instance(
     instance: dict,
     output_dir: Path,
     config: dict,
     progress_manager: RunBatchProgressManager,
+    acontext_config: dict | None = None,
 ) -> None:
     """Process a single SWEBench instance."""
     instance_id = instance["instance_id"]
@@ -142,13 +202,38 @@ def process_instance(
 
     try:
         env = get_sb_environment(config, instance)
-        agent = ProgressTrackingAgent(
-            model,
-            env,
-            progress_manager=progress_manager,
-            instance_id=instance_id,
-            **config.get("agent", {}),
-        )
+
+        # Determine agent class based on AContext configuration
+        if acontext_config:
+            from minisweagent.agents.context_aware import ContextAwareAgent
+            base_class = ContextAwareAgent
+
+            # Create instance-specific AContext config with unique session
+            instance_acontext_cfg = copy.deepcopy(acontext_config)
+            instance_acontext_cfg.setdefault("session", {})["session_id"] = None  # Force new session
+            instance_acontext_cfg["session"]["configs"] = {
+                "instance_id": instance_id,
+                "agent": "mini-swe-agent-swebench",
+            }
+
+            ProgressTrackingAgentClass = _create_progress_tracking_agent_class(base_class)
+            agent = ProgressTrackingAgentClass(
+                model,
+                env,
+                progress_manager=progress_manager,
+                instance_id=instance_id,
+                acontext_config=instance_acontext_cfg,
+                **config.get("agent", {}),
+            )
+        else:
+            agent = ProgressTrackingAgent(
+                model,
+                env,
+                progress_manager=progress_manager,
+                instance_id=instance_id,
+                **config.get("agent", {}),
+            )
+
         exit_status, result = agent.run(task)
     except Exception as e:
         logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
@@ -199,10 +284,15 @@ def main(
     output: str = typer.Option("", "-o", "--output", help="Output directory", rich_help_panel="Basic"),
     workers: int = typer.Option(1, "-w", "--workers", help="Number of worker threads for parallel processing", rich_help_panel="Basic"),
     model: str | None = typer.Option(None, "-m", "--model", help="Model to use", rich_help_panel="Basic"),
-    model_class: str | None = typer.Option(None, "-c", "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
     redo_existing: bool = typer.Option(False, "--redo-existing", help="Redo existing instances", rich_help_panel="Data selection"),
     config_spec: Path = typer.Option( builtin_config_dir / "extra" / "swebench.yaml", "-c", "--config", help="Path to a config file", rich_help_panel="Basic"),
     environment_class: str | None = typer.Option( None, "--environment-class", help="Environment type to use. Recommended are docker or singularity", rich_help_panel="Advanced"),
+    # AContext options
+    acontext_enabled: bool = typer.Option(False, "--acontext/--no-acontext", help="Enable AContext for SOP learning and experience retrieval", rich_help_panel="AContext"),
+    acontext_config: Path | None = typer.Option(None, "--acontext-config", help="Path to AContext config file", rich_help_panel="AContext"),
+    acontext_space_name: str | None = typer.Option(None, "--acontext-space-name", help="AContext space name (shared by all instances)", rich_help_panel="AContext"),
+    acontext_space_id: str | None = typer.Option(None, "--acontext-space-id", help="AContext space ID (takes precedence over name)", rich_help_panel="AContext"),
 ) -> None:
     # fmt: on
     output_path = Path(output)
@@ -231,6 +321,17 @@ def main(
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
 
+    # Load AContext configuration
+    acontext_cfg = _load_acontext_config(
+        acontext_enabled=acontext_enabled,
+        acontext_config_path=acontext_config,
+        acontext_space_name=acontext_space_name,
+        acontext_space_id=acontext_space_id,
+    )
+
+    if acontext_cfg:
+        logger.info(f"AContext enabled. Space: {acontext_cfg.get('space', {}).get('space_name', 'mini-swe-agent-default')}")
+
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")
 
     def process_futures(futures: dict[concurrent.futures.Future, str]):
@@ -247,9 +348,9 @@ def main(
     with Live(progress_manager.render_group, refresh_per_second=4):
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(process_instance, instance, output_path, config, progress_manager): instance[
-                    "instance_id"
-                ]
+                executor.submit(
+                    process_instance, instance, output_path, config, progress_manager, acontext_cfg
+                ): instance["instance_id"]
                 for instance in instances
             }
             try:

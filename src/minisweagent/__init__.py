@@ -71,6 +71,25 @@ class Agent(Protocol):
     def run(self, task: str, **kwargs) -> tuple[str, str]: ...
 
 
+# Lazy imports for AContext-related classes to avoid import errors if not installed
+def _get_acontext_manager():
+    """Lazy import of AContextManager."""
+    from minisweagent.acontext import AContextManager
+    return AContextManager
+
+
+def _get_context_aware_agent():
+    """Lazy import of ContextAwareAgent."""
+    from minisweagent.agents.context_aware import ContextAwareAgent
+    return ContextAwareAgent
+
+
+def _get_interactive_context_aware_agent():
+    """Lazy import of InteractiveContextAwareAgent."""
+    from minisweagent.agents.interactive_context_aware import InteractiveContextAwareAgent
+    return InteractiveContextAwareAgent
+
+
 __all__ = [
     "Agent",
     "Model",
@@ -80,4 +99,8 @@ __all__ = [
     "global_config_file",
     "global_config_dir",
     "logger",
+    # Lazy imports for AContext
+    "_get_acontext_manager",
+    "_get_context_aware_agent",
+    "_get_interactive_context_aware_agent",
 ]

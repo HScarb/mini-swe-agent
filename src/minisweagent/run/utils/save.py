@@ -4,11 +4,48 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent import Agent, __version__
+from minisweagent.utils.log import logger
 
 
 def _get_class_name_with_module(obj: Any) -> str:
     """Get the full class name with module path."""
     return f"{obj.__class__.__module__}.{obj.__class__.__name__}"
+
+
+def _get_acontext_info(agent: Agent) -> dict | None:
+    """Get AContext information from agent if available.
+
+    Args:
+        agent: The agent to get AContext info from.
+
+    Returns:
+        Dictionary with AContext information, or None if not available.
+    """
+    if not hasattr(agent, "acontext"):
+        return None
+
+    acontext = agent.acontext
+    if not acontext.enabled:
+        return None
+
+    try:
+        task_status = acontext.get_task_status()
+        sop_applied = getattr(agent, "sop_applied", False)
+
+        return {
+            "session_id": task_status.get("session_id"),
+            "space_id": task_status.get("space_id"),
+            "space_name": task_status.get("space_name"),
+            "total_tasks": task_status.get("total_tasks", 0),
+            "learning_status": task_status.get("learning_status", "unknown"),
+            "sop_applied": sop_applied,
+        }
+    except Exception as e:
+        logger.debug(f"Failed to get AContext info: {e}")
+        return {
+            "error": str(e),
+            "sop_applied": getattr(agent, "sop_applied", False),
+        }
 
 
 def save_traj(
@@ -61,6 +98,12 @@ def save_traj(
             "model_type": _get_class_name_with_module(agent.model),
             "environment_type": _get_class_name_with_module(agent.env),
         }
+
+        # Add AContext information if available
+        acontext_info = _get_acontext_info(agent)
+        if acontext_info:
+            data["info"]["acontext"] = acontext_info
+
     if extra_info:
         data["info"].update(extra_info)
 
