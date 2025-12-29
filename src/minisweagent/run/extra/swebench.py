@@ -136,6 +136,76 @@ def remove_from_preds_file(output_path: Path, instance_id: str):
             output_path.write_text(json.dumps(output_data, indent=2))
 
 
+def _find_or_create_space_upfront(acontext_config: dict) -> str | None:
+    """Find or create space before batch processing starts.
+
+    This ensures all workers share the same space by resolving the space_id
+    in the main thread before spawning workers.
+
+    Args:
+        acontext_config: AContext configuration dictionary.
+
+    Returns:
+        Space ID if successful, None otherwise.
+    """
+    import os
+
+    try:
+        from acontext import AcontextClient
+    except ImportError:
+        logger.warning("AContext SDK not installed. AContext features will be disabled.")
+        return None
+
+    api_key = acontext_config.get("api_key") or os.getenv("ACONTEXT_API_KEY")
+    base_url = acontext_config.get("base_url") or os.getenv("ACONTEXT_BASE_URL", "http://localhost:8029/api/v1")
+    timeout = acontext_config.get("timeout", 60.0)
+
+    if not api_key:
+        logger.warning("AContext API key not configured. AContext features will be disabled.")
+        return None
+
+    try:
+        client = AcontextClient(api_key=api_key, base_url=base_url, timeout=timeout)
+        client.ping()
+    except Exception as e:
+        logger.warning(f"Failed to connect to AContext server: {e}")
+        return None
+
+    space_config = acontext_config.get("space", {})
+    space_id = space_config.get("space_id")
+    space_name = space_config.get("space_name", "mini-swe-agent-default")
+
+    try:
+        if space_id:
+            # Verify the space exists
+            client.spaces.get_configs(space_id)
+            logger.info(f"Using existing space ID: {space_id}")
+            client.close()
+            return space_id
+
+        # Find or create space by name
+        result = client.spaces.list(limit=100)
+        for space in result.items:
+            if space.configs.get("name") == space_name:
+                logger.info(f"Found existing space: '{space_name}' (ID: {space.id})")
+                client.close()
+                return space.id
+
+        # Create new space if not found
+        new_space = client.spaces.create(configs={"name": space_name})
+        logger.info(f"Created new space: '{space_name}' (ID: {new_space.id})")
+        client.close()
+        return new_space.id
+
+    except Exception as e:
+        logger.warning(f"Failed to find or create space: {e}")
+        try:
+            client.close()
+        except Exception:
+            pass
+        return None
+
+
 def _load_acontext_config(
     acontext_enabled: bool,
     acontext_config_path: Path | None,
@@ -174,6 +244,14 @@ def _load_acontext_config(
         acontext_config.setdefault("space", {})["space_name"] = acontext_space_name
     if acontext_space_id:
         acontext_config.setdefault("space", {})["space_id"] = acontext_space_id
+
+    # Pre-create/find space in main thread to avoid race conditions
+    resolved_space_id = _find_or_create_space_upfront(acontext_config)
+    if resolved_space_id:
+        acontext_config.setdefault("space", {})["space_id"] = resolved_space_id
+    else:
+        logger.warning("Failed to resolve space. AContext will be disabled.")
+        return None
 
     return acontext_config
 
@@ -330,7 +408,8 @@ def main(
     )
 
     if acontext_cfg:
-        logger.info(f"AContext enabled. Space: {acontext_cfg.get('space', {}).get('space_name', 'mini-swe-agent-default')}")
+        space_info = acontext_cfg.get('space', {})
+        logger.info(f"AContext enabled. Space: '{space_info.get('space_name', 'mini-swe-agent-default')}' (ID: {space_info.get('space_id')})")
 
     progress_manager = RunBatchProgressManager(len(instances), output_path / f"exit_statuses_{time.time()}.yaml")
 

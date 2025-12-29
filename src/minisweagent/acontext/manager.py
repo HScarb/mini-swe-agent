@@ -232,12 +232,30 @@ class AContextManager:
         if not message_config.get("store_realtime", True):
             return False
 
+        # Skip system messages - OpenAI format doesn't support them for storage
+        # System prompts should be configured at session/skill level
+        if role == "system":
+            logger.debug("Skipping system message storage (not supported in OpenAI format)")
+            return False
+
         try:
-            message = {"role": role, "content": content, **kwargs}
+            # Build OpenAI-compatible message, only include valid fields
+            message: dict = {"role": role, "content": content}
+
+            # Include tool_calls for assistant messages if present
+            if role == "assistant" and "tool_calls" in kwargs:
+                message["tool_calls"] = kwargs["tool_calls"]
+
+            # Include name if present (valid for user messages)
+            if "name" in kwargs:
+                message["name"] = kwargs["name"]
+
             self._client.sessions.store_message(
                 session_id=self.session_id,
                 blob=message,
+                format="openai",
             )
+            logger.debug(f"Successfully stored {role} message to AContext")
             return True
         except Exception as e:
             logger.debug(f"Failed to store message to AContext: {e}")
