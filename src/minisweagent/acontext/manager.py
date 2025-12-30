@@ -238,6 +238,12 @@ class AContextManager:
             logger.debug("Skipping system message storage (not supported in OpenAI format)")
             return False
 
+        # Skip messages with empty content (unless they have tool_calls)
+        # AContext requires message to have at least one part
+        if not content and "tool_calls" not in kwargs:
+            logger.debug(f"Skipping {role} message with empty content (no valid parts)")
+            return False
+
         try:
             # Build OpenAI-compatible message, only include valid fields
             message: dict = {"role": role, "content": content}
