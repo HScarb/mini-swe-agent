@@ -97,6 +97,9 @@ class InteractiveContextAwareAgent(InteractiveAgent):
         Args:
             task: The task description to search for.
         """
+        # Initialize historical_sop to empty string to avoid undefined error in template
+        self.extra_template_vars["historical_sop"] = ""
+
         try:
             with console.status("[bold blue]Searching for relevant SOPs..."):
                 sop_blocks = self.acontext.search_sop(task)

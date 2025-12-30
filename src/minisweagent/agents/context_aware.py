@@ -76,6 +76,9 @@ class ContextAwareAgent(DefaultAgent):
         Args:
             task: The task description to search for.
         """
+        # Initialize historical_sop to empty string to avoid undefined error in template
+        self.extra_template_vars["historical_sop"] = ""
+
         try:
             sop_blocks = self.acontext.search_sop(task)
             if not sop_blocks:
