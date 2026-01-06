@@ -186,7 +186,7 @@ def _find_or_create_space_upfront(acontext_config: dict) -> str | None:
         # Find or create space by name
         result = client.spaces.list(limit=100)
         for space in result.items:
-            if space.configs.get("name") == space_name:
+            if space.configs and space.configs.get("name") == space_name:
                 logger.info(f"Found existing space: '{space_name}' (ID: {space.id})")
                 client.close()
                 return space.id

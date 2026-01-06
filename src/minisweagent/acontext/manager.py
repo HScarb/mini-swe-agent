@@ -143,7 +143,7 @@ class AContextManager:
                 # Use specified space ID
                 self._space = self._client.spaces.get_configs(space_id)
                 self.space_id = space_id
-                self.space_name = self._space.configs.get("name", space_name)
+                self.space_name = (self._space.configs or {}).get("name", space_name)
                 logger.info(f"Using existing space: '{self.space_name}' (ID: {self.space_id})")
             else:
                 # Find or create space by name
@@ -151,7 +151,7 @@ class AContextManager:
                 if self._space is None:
                     return False
                 self.space_id = self._space.id
-                self.space_name = self._space.configs.get("name", space_name)
+                self.space_name = (self._space.configs or {}).get("name", space_name)
 
             return True
         except Exception as e:
@@ -171,7 +171,7 @@ class AContextManager:
             # List all spaces and find by name
             result = self._client.spaces.list(limit=100)
             for space in result.items:
-                if space.configs.get("name") == space_name:
+                if space.configs and space.configs.get("name") == space_name:
                     logger.info(f"Found existing space: '{space_name}' (ID: {space.id})")
                     return space
 
@@ -232,12 +232,6 @@ class AContextManager:
         if not message_config.get("store_realtime", True):
             return False
 
-        # Skip system messages - OpenAI format doesn't support them for storage
-        # System prompts should be configured at session/skill level
-        if role == "system":
-            logger.debug("Skipping system message storage (not supported in OpenAI format)")
-            return False
-
         # Skip messages with empty content (unless they have tool_calls)
         # AContext requires message to have at least one part
         if not content and "tool_calls" not in kwargs:
@@ -245,8 +239,17 @@ class AContextManager:
             return False
 
         try:
-            # Build OpenAI-compatible message, only include valid fields
-            message: dict = {"role": role, "content": content}
+            # Convert system message to user message with special marker
+            # AContext API doesn't support system messages directly
+            if role == "system":
+                message: dict = {
+                    "role": "user",
+                    "content": f"[SYSTEM PROMPT]\n{content}\n[/SYSTEM PROMPT]",
+                    "name": "system_prompt"
+                }
+            else:
+                # Build OpenAI-compatible message, only include valid fields
+                message: dict = {"role": role, "content": content}
 
             # Include tool_calls for assistant messages if present
             if role == "assistant" and "tool_calls" in kwargs:
@@ -358,7 +361,8 @@ class AContextManager:
                     for step in tool_sops:
                         if isinstance(step, dict):
                             tool_name = step.get("tool_name", "Unknown")
-                            description = step.get("description", "")
+                            # Support both "action" (from AContext backend) and "description"
+                            description = step.get("action") or step.get("description", "")
                             lines.append(f"  - [{tool_name}] {description}")
                         else:
                             lines.append(f"  - {step}")

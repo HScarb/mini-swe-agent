@@ -50,6 +50,7 @@ def _load_acontext_config(
     acontext_space_name: str | None,
     acontext_space_id: str | None,
     acontext_session_id: str | None,
+    sop_enable: bool = False,
 ) -> dict | None:
     """Load and prepare AContext configuration.
 
@@ -59,6 +60,7 @@ def _load_acontext_config(
         acontext_space_name: Space name override.
         acontext_space_id: Space ID override.
         acontext_session_id: Session ID to resume.
+        sop_enable: Whether to enable SOP injection into prompt.
 
     Returns:
         AContext configuration dictionary, or None if disabled.
@@ -78,6 +80,9 @@ def _load_acontext_config(
 
     # Enable AContext
     acontext_config["enabled"] = True
+
+    # Set SOP enable flag
+    acontext_config["sop_enable"] = sop_enable
 
     # Apply CLI overrides
     if acontext_space_name:
@@ -108,6 +113,7 @@ def main(
     acontext_space_name: str | None = typer.Option(None, "--acontext-space-name", help="AContext space name", rich_help_panel="AContext"),
     acontext_space_id: str | None = typer.Option(None, "--acontext-space-id", help="AContext space ID (takes precedence over name)", rich_help_panel="AContext"),
     acontext_session_id: str | None = typer.Option(None, "--acontext-session-id", help="AContext session ID to resume", rich_help_panel="AContext"),
+    sop_enable: bool = typer.Option(False, "--sop-enable", help="Enable SOP injection into prompt (requires --acontext)", rich_help_panel="AContext"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -146,6 +152,7 @@ def main(
         acontext_space_name=acontext_space_name,
         acontext_space_id=acontext_space_id,
         acontext_session_id=acontext_session_id,
+        sop_enable=sop_enable,
     )
 
     # Determine agent class based on visual mode and AContext

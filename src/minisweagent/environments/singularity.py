@@ -2,6 +2,7 @@
 
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -58,7 +59,7 @@ class SingularityEnvironment:
         return sandbox_dir
 
     def get_template_vars(self) -> dict[str, Any]:
-        return self.config.model_dump()
+        return self.config.model_dump() | platform.uname()._asdict()
 
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         """Execute a command in a Singularity container and return the result as a dict."""

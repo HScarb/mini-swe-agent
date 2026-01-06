@@ -34,6 +34,7 @@ class ContextAwareAgent(DefaultAgent):
         super().__init__(*args, **kwargs)
         self.acontext = AContextManager(acontext_config)
         self.sop_applied = False
+        self.sop_enable = acontext_config.get("sop_enable", False) if acontext_config else False
 
     def run(self, task: str, **kwargs) -> tuple[str, str]:
         """Run step() until agent is finished.
@@ -54,9 +55,14 @@ class ContextAwareAgent(DefaultAgent):
         # Initialize AContext
         acontext_initialized = self.acontext.initialize()
 
-        # Search and apply SOPs if AContext is available
-        if acontext_initialized:
+        # Search and apply SOPs if AContext is available and SOP is enabled
+        if acontext_initialized and self.sop_enable:
+            logger.info("SOP injection enabled, searching for relevant SOPs...")
             self._search_and_apply_sop(task)
+        elif acontext_initialized and not self.sop_enable:
+            logger.debug("SOP injection disabled (use --sop-enable to enable)")
+            # Initialize historical_sop to empty to avoid template error
+            self.extra_template_vars["historical_sop"] = ""
 
         try:
             # Run the parent agent loop
@@ -90,6 +96,7 @@ class ContextAwareAgent(DefaultAgent):
                 self.extra_template_vars["historical_sop"] = sop_text
                 self.sop_applied = True
                 logger.info(f"Applied {len(sop_blocks)} SOP(s) from historical experience")
+                logger.debug(f"SOP content:\n{sop_text}")
 
         except Exception as e:
             logger.debug(f"Failed to search/apply SOPs: {e}")
@@ -105,6 +112,13 @@ class ContextAwareAgent(DefaultAgent):
             **kwargs: Additional message fields.
         """
         super().add_message(role, content, **kwargs)
+
+        # Verify SOP injection immediately when system message is added
+        if role == "system" and self.sop_applied:
+            if "Historical Experience (SOP)" in content:
+                logger.debug("✓ SOP successfully injected into system prompt")
+            else:
+                logger.warning("✗ SOP was applied but not found in system prompt")
 
         # Store to AContext (async, non-blocking)
         if self.acontext.enabled:
