@@ -23,7 +23,7 @@ from minisweagent import Environment
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
-from minisweagent.models import get_model
+from minisweagent.models import get_model, GLOBAL_MODEL_STATS
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.utils.save import save_traj
 from minisweagent.utils.log import add_file_handler, logger
@@ -50,6 +50,7 @@ DATASET_MAPPING = {
 DEFAULT_ACONTEXT_CONFIG = builtin_config_dir / "acontext.yaml"
 
 _OUTPUT_FILE_LOCK = threading.Lock()
+_INSTANCE_STATS: dict[str, dict] = {}  # Thread-safe storage for instance statistics
 
 
 def _create_progress_tracking_agent_class(base_class):
@@ -211,6 +212,7 @@ def _load_acontext_config(
     acontext_config_path: Path | None,
     acontext_space_name: str | None,
     acontext_space_id: str | None,
+    sop_enable: bool = False,
 ) -> dict | None:
     """Load and prepare AContext configuration for batch processing.
 
@@ -219,6 +221,7 @@ def _load_acontext_config(
         acontext_config_path: Path to AContext config file.
         acontext_space_name: Space name override.
         acontext_space_id: Space ID override.
+        sop_enable: Whether to enable SOP injection into prompt.
 
     Returns:
         AContext configuration dictionary, or None if disabled.
@@ -238,6 +241,9 @@ def _load_acontext_config(
 
     # Enable AContext
     acontext_config["enabled"] = True
+
+    # Set SOP enable flag
+    acontext_config["sop_enable"] = sop_enable
 
     # Apply CLI overrides
     if acontext_space_name:
@@ -277,6 +283,9 @@ def process_instance(
 
     agent = None
     extra_info = None
+
+    # Record start time
+    start_time = time.time()
 
     try:
         env = get_sb_environment(config, instance)
@@ -318,6 +327,62 @@ def process_instance(
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
+        # Calculate elapsed time
+        elapsed_time = time.time() - start_time
+
+        # Get token usage from model object (each instance has its own model)
+        instance_tokens = {
+            "prompt_tokens": getattr(model, 'prompt_tokens', 0),
+            "completion_tokens": getattr(model, 'completion_tokens', 0),
+            "total_tokens": getattr(model, 'total_tokens', 0),
+            "cost": getattr(model, 'cost', 0.0),
+            "calls": getattr(model, 'n_calls', 0),
+        }
+
+        # Format elapsed time as mm:ss
+        elapsed_minutes = int(elapsed_time // 60)
+        elapsed_seconds = int(elapsed_time % 60)
+        elapsed_str = f"{elapsed_minutes:02d}:{elapsed_seconds:02d}"
+
+        # Log to console
+        log_msg = (
+            f"[{instance_id}] Token Usage: "
+            f"prompt={instance_tokens['prompt_tokens']}, "
+            f"completion={instance_tokens['completion_tokens']}, "
+            f"total={instance_tokens['total_tokens']}, "
+            f"cost=${instance_tokens['cost']:.4f}, "
+            f"calls={instance_tokens['calls']}, "
+            f"time={elapsed_str}"
+        )
+        logger.info(log_msg)
+
+        # Append to summary.log (thread-safe)
+        summary_log_path = output_dir / "summary.log"
+        summary_line = (
+            f"{instance_id}\t"
+            f"prompt_tokens={instance_tokens['prompt_tokens']}\t"
+            f"completion_tokens={instance_tokens['completion_tokens']}\t"
+            f"total_tokens={instance_tokens['total_tokens']}\t"
+            f"cost=${instance_tokens['cost']:.4f}\t"
+            f"calls={instance_tokens['calls']}\t"
+            f"time={elapsed_str}\t"
+            f"exit_status={exit_status}\n"
+        )
+        with _OUTPUT_FILE_LOCK:
+            with open(summary_log_path, "a") as f:
+                f.write(summary_line)
+            # Store instance stats for final summary
+            _INSTANCE_STATS[instance_id] = {
+                "prompt_tokens": instance_tokens['prompt_tokens'],
+                "completion_tokens": instance_tokens['completion_tokens'],
+                "total_tokens": instance_tokens['total_tokens'],
+                "cost": instance_tokens['cost'],
+                "calls": instance_tokens['calls'],
+                "time": elapsed_str,
+                "time_seconds": elapsed_time,
+                "exit_status": exit_status,
+            }
+
         save_traj(
             agent,
             instance_dir / f"{instance_id}.traj.json",
@@ -371,6 +436,7 @@ def main(
     acontext_config: Path | None = typer.Option(None, "--acontext-config", help="Path to AContext config file", rich_help_panel="AContext"),
     acontext_space_name: str | None = typer.Option(None, "--acontext-space-name", help="AContext space name (shared by all instances)", rich_help_panel="AContext"),
     acontext_space_id: str | None = typer.Option(None, "--acontext-space-id", help="AContext space ID (takes precedence over name)", rich_help_panel="AContext"),
+    sop_enable: bool = typer.Option(False, "--sop-enable", help="Enable SOP injection into prompt (requires --acontext)", rich_help_panel="AContext"),
 ) -> None:
     # fmt: on
     output_path = Path(output)
@@ -405,6 +471,7 @@ def main(
         acontext_config_path=acontext_config,
         acontext_space_name=acontext_space_name,
         acontext_space_id=acontext_space_id,
+        sop_enable=sop_enable,
     )
 
     if acontext_cfg:
@@ -440,6 +507,102 @@ def main(
                     if not future.running() and not future.done():
                         future.cancel()
                 process_futures(futures)
+
+    # Calculate totals from instance stats (more accurate than GLOBAL_MODEL_STATS)
+    total_prompt_tokens = sum(s['prompt_tokens'] for s in _INSTANCE_STATS.values())
+    total_completion_tokens = sum(s['completion_tokens'] for s in _INSTANCE_STATS.values())
+    total_tokens = sum(s['total_tokens'] for s in _INSTANCE_STATS.values())
+    total_cost = sum(s['cost'] for s in _INSTANCE_STATS.values())
+    total_calls = sum(s['calls'] for s in _INSTANCE_STATS.values())
+
+    # Calculate sum of instance times
+    total_instance_time = sum(s['time_seconds'] for s in _INSTANCE_STATS.values())
+    sum_minutes = int(total_instance_time // 60)
+    sum_seconds = int(total_instance_time % 60)
+    sum_time_str = f"{sum_minutes:02d}:{sum_seconds:02d}"
+
+    # Print overall token usage statistics
+    overall_msg = (
+        f"Overall Progress - Total Token Usage: "
+        f"instances={len(_INSTANCE_STATS)}, "
+        f"prompt_tokens={total_prompt_tokens}, "
+        f"completion_tokens={total_completion_tokens}, "
+        f"total_tokens={total_tokens}, "
+        f"cost=${total_cost:.4f}, "
+        f"n_calls={total_calls}, "
+        f"time={sum_time_str}"
+    )
+    logger.info(overall_msg)
+
+    # Print and write final summary report
+    summary_log_path = output_path / "summary.log"
+    with open(summary_log_path, "a") as f:
+        # Write separator
+        f.write("\n" + "=" * 80 + "\n")
+        f.write(f"BATCH SUMMARY REPORT - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 80 + "\n\n")
+
+        # Write header
+        header = "instance_id\tprompt_tokens\tcompletion_tokens\ttotal_tokens\tcost\tcalls\ttime\texit_status\n"
+        f.write(header)
+        f.write("-" * 80 + "\n")
+
+        # Write each instance stats
+        for instance in instances:
+            iid = instance["instance_id"]
+            if iid in _INSTANCE_STATS:
+                stats = _INSTANCE_STATS[iid]
+                line = (
+                    f"{iid}\t"
+                    f"{stats['prompt_tokens']}\t"
+                    f"{stats['completion_tokens']}\t"
+                    f"{stats['total_tokens']}\t"
+                    f"${stats['cost']:.4f}\t"
+                    f"{stats['calls']}\t"
+                    f"{stats['time']}\t"
+                    f"{stats['exit_status']}\n"
+                )
+                f.write(line)
+
+        # Write overall summary
+        f.write("-" * 80 + "\n")
+        overall_summary_line = (
+            f"TOTAL\t"
+            f"{total_prompt_tokens}\t"
+            f"{total_completion_tokens}\t"
+            f"{total_tokens}\t"
+            f"${total_cost:.4f}\t"
+            f"{total_calls}\t"
+            f"{sum_time_str}\t"
+            f"instances={len(_INSTANCE_STATS)}\n"
+        )
+        f.write(overall_summary_line)
+        f.write("=" * 80 + "\n")
+
+    # Log summary table to console
+    logger.info("=" * 60)
+    logger.info("BATCH SUMMARY REPORT")
+    logger.info("=" * 60)
+    for instance in instances:
+        iid = instance["instance_id"]
+        if iid in _INSTANCE_STATS:
+            stats = _INSTANCE_STATS[iid]
+            logger.info(
+                f"  {iid}: tokens={stats['total_tokens']}, "
+                f"cost=${stats['cost']:.4f}, time={stats['time']}, "
+                f"status={stats['exit_status']}"
+            )
+    logger.info("-" * 60)
+    logger.info(
+        f"  TOTAL: instances={len(_INSTANCE_STATS)}, "
+        f"tokens={total_tokens}, "
+        f"cost=${total_cost:.4f}, "
+        f"time={sum_time_str}"
+    )
+    logger.info("=" * 60)
+
+    # Clear instance stats for next run
+    _INSTANCE_STATS.clear()
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
-from minisweagent.models import get_model
+from minisweagent.models import get_model, GLOBAL_MODEL_STATS
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
 from minisweagent.utils.log import logger
@@ -181,6 +181,16 @@ def main(
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
+        # Print token usage statistics
+        stats = GLOBAL_MODEL_STATS.get_stats()
+        console.print(
+            f"[bold cyan]Overall Progress - Token Usage:[/bold cyan] "
+            f"prompt_tokens={stats['prompt_tokens']}, "
+            f"completion_tokens={stats['completion_tokens']}, "
+            f"total_tokens={stats['total_tokens']}, "
+            f"cost=${stats['cost']:.4f}, "
+            f"n_calls={stats['n_calls']}"
+        )
         save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
     return agent
 

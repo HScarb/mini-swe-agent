@@ -36,6 +36,9 @@ class LitellmModel:
         self.config = config_class(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
@@ -86,9 +89,22 @@ class LitellmModel:
                 )
                 logger.critical(msg)
                 raise RuntimeError(msg) from e
+
+        # Extract token usage
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        if hasattr(response, 'usage') and response.usage:
+            prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
+            completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
+            total_tokens = getattr(response.usage, 'total_tokens', 0) or 0
+
         self.n_calls += 1
         self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        self.total_tokens += total_tokens
+        GLOBAL_MODEL_STATS.add(cost, prompt_tokens, completion_tokens, total_tokens)
         return {
             "content": response.choices[0].message.content or "",  # type: ignore
             "extra": {
